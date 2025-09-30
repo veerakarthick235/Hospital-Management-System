@@ -207,7 +207,7 @@ async def register_user(user_data: UserCreate):
         )
     
     # Hash password and create user
-    hashed_password = get_password_hash(user_data.password)
+    hashed_password = hash_password(user_data.password)
     user_dict = user_data.dict()
     del user_dict["password"]
     user_obj = User(**user_dict)
