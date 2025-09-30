@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
-from passlib.context import CryptContext
+import hashlib
 from jose import JWTError, jwt
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import enum
