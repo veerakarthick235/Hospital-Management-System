@@ -23,8 +23,12 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Security
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+# Security functions
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, hashed: str) -> bool:
+    return hashlib.sha256(password.encode()).hexdigest() == hashed
 security = HTTPBearer()
 JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY')
 JWT_ALGORITHM = "HS256"
