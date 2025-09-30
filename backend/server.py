@@ -191,6 +191,11 @@ def require_role(allowed_roles: List[UserRole]):
         return current_user
     return role_checker
 
+# Basic route
+@api_router.get("/")
+async def root():
+    return {"message": "Hospital Management System API", "status": "running"}
+
 # Authentication endpoints
 @api_router.post("/auth/register", response_model=User)
 async def register_user(user_data: UserCreate):
