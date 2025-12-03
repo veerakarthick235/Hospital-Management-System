@@ -12,18 +12,32 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import hashlib
 from jose import JWTError, jwt
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import anthropic 
 import enum
+
+# Configure logging first
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+try:
+    mongo_url = os.environ['MONGO_URL']
+    client = AsyncIOMotorClient(mongo_url)
+    db = client[os.environ.get('DB_NAME', 'hospital_db')]
+except KeyError:
+    logger.error("MONGO_URL environment variable not set. Please check your .env file.")
+    raise EnvironmentError("MONGO_URL must be set in the .env file.")
+except Exception as e:
+    logger.error(f"Error connecting to MongoDB: {e}")
+    raise
 
-# Security functions
+# Security constants
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -32,7 +46,8 @@ def verify_password(password: str, hashed: str) -> bool:
 security = HTTPBearer()
 JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY')
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_TIME_MINUTES = 1440  # 24 hours
+# 🌟 CORRECTION: The non-breaking space (U+00A0) has been replaced with a standard space
+JWT_EXPIRATION_TIME_MINUTES = 1440 # 24 hours 
 
 # Create the main app without a prefix
 app = FastAPI(title="Hospital Management System")
@@ -152,8 +167,7 @@ class AIDocumentationRequest(BaseModel):
     examination_findings: str
     treatment_plan: str
 
-# Functions moved above
-
+# Functions
 def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRATION_TIME_MINUTES)
@@ -198,7 +212,6 @@ async def root():
 # Authentication endpoints
 @api_router.post("/auth/register", response_model=User)
 async def register_user(user_data: UserCreate):
-    # Check if user already exists
     existing_user = await db.users.find_one({"email": user_data.email})
     if existing_user:
         raise HTTPException(
@@ -206,13 +219,11 @@ async def register_user(user_data: UserCreate):
             detail="Email already registered"
         )
     
-    # Hash password and create user
     hashed_password = hash_password(user_data.password)
-    user_dict = user_data.dict()
+    user_dict = user_data.dict(exclude_unset=True)
     del user_dict["password"]
     user_obj = User(**user_dict)
     
-    # Store user with hashed password
     user_data_to_store = user_obj.dict()
     user_data_to_store["hashed_password"] = hashed_password
     
@@ -259,7 +270,6 @@ async def get_patient(
     patient_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    # Patients can only view their own data
     if current_user.role == UserRole.PATIENT:
         patient = await db.patients.find_one({"user_id": current_user.id})
     else:
@@ -284,7 +294,6 @@ async def get_appointments(
     current_user: User = Depends(get_current_user)
 ):
     if current_user.role == UserRole.PATIENT:
-        # Get patient data first
         patient = await db.patients.find_one({"user_id": current_user.id})
         if not patient:
             return []
@@ -306,7 +315,7 @@ async def update_appointment(
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found")
     
-    update_dict = {k: v for k, v in update_data.dict().items() if v is not None}
+    update_dict = {k: v for k, v in update_data.dict(exclude_unset=True).items() if v is not None}
     if update_dict:
         await db.appointments.update_one({"id": appointment_id}, {"$set": update_dict})
         appointment.update(update_dict)
@@ -337,22 +346,20 @@ async def get_bills(
     
     return [Bill(**bill) for bill in bills]
 
-# AI Documentation endpoint
+# 🌟 CORRECTED AI Documentation endpoint using the official Anthropic SDK
 @api_router.post("/ai/generate-notes")
 async def generate_ai_notes(
     request: AIDocumentationRequest,
     current_user: User = Depends(require_role([UserRole.DOCTOR, UserRole.NURSE]))
 ):
-    try:
-        # Initialize Claude chat
-        chat = LlmChat(
-            api_key=os.environ.get('EMERGENT_LLM_KEY'),
-            session_id=f"medical_notes_{request.appointment_id}",
-            system_message="You are a medical documentation assistant. Generate comprehensive, professional medical notes based on the provided information. Focus on clarity, accuracy, and proper medical terminology."
-        ).with_model("anthropic", "claude-3-7-sonnet-20250219")
+    # Fetch API Key using the existing environment variable name
+    ANTHROPIC_API_KEY = os.environ.get('EMERGENT_LLM_KEY') 
+    if not ANTHROPIC_API_KEY:
+        logger.error("EMERGENT_LLM_KEY (Anthropic API Key) not configured.")
+        raise HTTPException(status_code=500, detail="LLM API Key not configured.")
         
-        # Create prompt for medical documentation
-        prompt = f"""
+    # Create prompt for medical documentation
+    prompt = f"""
 Please generate comprehensive medical notes based on the following information:
 
 Patient Symptoms: {request.patient_symptoms}
@@ -368,22 +375,37 @@ Format the notes professionally with sections for:
 
 Ensure all medical terminology is accurate and the documentation is suitable for medical records.
 """
+    try:
+        # Initialize the Anthropic Client
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
         
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
+        # Call the Messages API
+        response = await client.messages.create(
+            # Using a reliable Claude 3 Sonnet model name
+            model="claude-3-sonnet-20240229", 
+            max_tokens=2000,
+            system="You are a medical documentation assistant. Generate comprehensive, professional medical notes based on the provided information. Focus on clarity, accuracy, and proper medical terminology.",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # Extract the text response
+        generated_notes = response.content[0].text
         
         # Update appointment with AI-generated notes
         await db.appointments.update_one(
             {"id": request.appointment_id},
-            {"$set": {"ai_generated_notes": response}}
+            {"$set": {"ai_generated_notes": generated_notes}}
         )
         
-        return {"generated_notes": response, "appointment_id": request.appointment_id}
+        return {"generated_notes": generated_notes, "appointment_id": request.appointment_id}
         
     except Exception as e:
+        logger.error(f"Anthropic API call failed: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate AI notes: {str(e)}"
+            detail=f"Failed to generate AI notes: {str(e)}. Check your API key and network connection."
         )
 
 # Dashboard stats endpoint
@@ -427,6 +449,7 @@ async def get_users(
 # Include the router in the main app
 app.include_router(api_router)
 
+# Apply CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -434,13 +457,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
